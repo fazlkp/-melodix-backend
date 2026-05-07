@@ -1,0 +1,13 @@
+services:
+  - type: web
+    name: melodix-api
+    env: python
+    buildCommand: pip install -r requirements.txt
+    startCommand: gunicorn app:app --workers 2 --bind 0.0.0.0:$PORT --timeout 120
+    envVars:
+      - key: DEBUG
+        value: false
+    disk:
+      name: artefacts
+      mountPath: /opt/render/project/src/artefacts
+      sizeGB: 1
