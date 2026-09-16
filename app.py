@@ -32,8 +32,10 @@ svd_model     = joblib.load(os.path.join(ARTEFACTS, "svd_model.pkl"))
 scaler        = joblib.load(os.path.join(ARTEFACTS, "scaler.pkl"))
 user_factors  = np.load(os.path.join(ARTEFACTS, "user_factors.npy"))
 item_factors  = np.load(os.path.join(ARTEFACTS, "item_factors.npy"))
-svd_scores    = np.load(os.path.join(ARTEFACTS, "svd_scores.npy"))
 feature_array = np.load(os.path.join(ARTEFACTS, "feature_array.npy"))
+# SVD scores are computed on-the-fly per request (item_factors @ user_vec) —
+# a full precomputed (users x tracks) matrix isn't worth ~90MB in git for a
+# dot product that takes <1ms.
 train_matrix  = sp.load_npz(os.path.join(ARTEFACTS, "train_matrix.npz"))
 tracks_df     = pd.read_csv(os.path.join(ARTEFACTS, "tracks.csv"))
 
@@ -68,10 +70,13 @@ print(f"Ready — {NUM_USERS} users, {NUM_TRACKS} tracks, {feature_array.shape[1
 
 def track_to_dict(row, score=None, rank=None):
     artist = row["artist"]
-    sp_url = f"https://open.spotify.com/search/{artist.replace(' ', '%20')}"
-    yt_url = f"https://www.youtube.com/results?search_query={artist.replace(' ', '+').replace('&', '%26')}+music"
+    track_id = row["track_id"]
+    # Real Spotify track IDs now (song-level data) -> real, playable links
+    sp_url = f"https://open.spotify.com/track/{track_id}"
+    sp_embed_url = f"https://open.spotify.com/embed/track/{track_id}"
+    yt_url = f"https://www.youtube.com/results?search_query={artist.replace(' ', '+').replace('&', '%26')}+{row['track_name'].replace(' ', '+')}"
     d = {
-        "track_id":    row["track_id"],
+        "track_id":    track_id,
         "track_name":  row["track_name"],
         "artist":      artist,
         "genre":       row["genre_clean"],
@@ -83,6 +88,7 @@ def track_to_dict(row, score=None, rank=None):
         "tempo":       round(float(row["tempo"]),        2),
         "popularity":  round(float(row["popularity"]),   1),
         "spotify_url": sp_url,
+        "spotify_embed_url": sp_embed_url,
         "youtube_url": yt_url,
     }
     if score is not None:
@@ -160,7 +166,7 @@ def recommend():
     else:  # hybrid
         s_svd     = _svd_scores(user_id)
         s_content = _content_scores(user_id)
-        alpha = 0.7   # 70% collaborative, 30% content
+        alpha = 0.3   # 30% collaborative, 70% content — tuned via P@10/NDCG@10 sweep
         # normalise each to [0,1] before blending
         s_svd     = _minmax(s_svd)
         s_content = _minmax(s_content)
@@ -426,11 +432,7 @@ def stats():
 # ─────────────────────────────────────────────
 
 def _svd_scores(user_id: int) -> np.ndarray:
-    """Return SVD-predicted scores for all tracks for a given user."""
-    # Use precomputed matrix if available (same user range)
-    if user_id < svd_scores.shape[0]:
-        return svd_scores[user_id]
-    # Fallback: compute on-the-fly via dot product
+    """Return SVD-predicted scores for all tracks for a given user (on-the-fly dot product)."""
     return item_factors @ user_factors[user_id]
 
 
