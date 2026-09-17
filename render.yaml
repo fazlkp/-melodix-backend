@@ -7,6 +7,8 @@ services:
     envVars:
       - key: DEBUG
         value: false
+      - key: SECRET_KEY
+        generateValue: true
     disk:
       name: artefacts
       mountPath: /opt/render/project/src/artefacts

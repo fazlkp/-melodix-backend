@@ -14,10 +14,13 @@ import os
 from sklearn.metrics.pairwise import cosine_similarity
 from sklearn.neighbors import NearestNeighbors
 
+from auth import auth_bp, init_db, get_user_from_request, get_db
+
 warnings.filterwarnings("ignore")
 
 app = Flask(__name__)
 CORS(app)  # Allow frontend to call this API from any origin
+app.register_blueprint(auth_bp)
 
 # ─────────────────────────────────────────────
 # LOAD ALL ARTEFACTS ON STARTUP
@@ -57,6 +60,28 @@ print("Normalising feature array for content similarity...")
 feature_norm = feature_array / (
     np.linalg.norm(feature_array, axis=1, keepdims=True) + 1e-9
 )
+
+init_db(n_train_users=user_factors.shape[0])
+track_id_to_idx = {tid: i for i, tid in enumerate(tracks_df["track_id"])}
+
+
+def get_real_likes_boost(user_row):
+    """
+    For a logged-in account: build a content-based score vector from their
+    actual liked tracks (server-stored), so recs improve as they use the
+    app for real — independent of the frozen synthetic SVD profile.
+    Returns None if they haven't liked anything yet (falls back to pure
+    cold-start svd_profile_id behaviour).
+    """
+    conn = get_db()
+    rows = conn.execute(
+        "SELECT track_id FROM liked_tracks WHERE user_id = ?", (user_row["id"],)
+    ).fetchall()
+    conn.close()
+    liked_idx = [track_id_to_idx[r["track_id"]] for r in rows if r["track_id"] in track_id_to_idx]
+    if not liked_idx:
+        return None
+    return cosine_similarity(feature_norm[liked_idx], feature_norm).mean(axis=0)
 
 NUM_USERS  = user_factors.shape[0]   # 800
 NUM_TRACKS = item_factors.shape[0]   # 222
@@ -126,19 +151,28 @@ def index():
 def recommend():
     """
     GET /recommend?user_id=42&model=svd&k=10
+    Authorization: Bearer <token>   (optional — overrides user_id with the
+                                      logged-in account's cold-start profile,
+                                      and blends in their real liked-track
+                                      signal once they have any)
 
-    user_id : int  0–799  (required)
+    user_id : int  0–1199  (required unless Authorization header is sent)
     model   : str  svd | knn | content | hybrid  (default: svd)
     k       : int  1–50   (default: 10)
     """
-    # ── parse params ──
-    try:
-        user_id = int(request.args.get("user_id", -1))
-    except ValueError:
-        return jsonify({"error": "user_id must be an integer"}), 400
+    account = get_user_from_request()
+    real_boost = None
 
-    if user_id < 0 or user_id >= NUM_USERS:
-        return jsonify({"error": f"user_id must be between 0 and {NUM_USERS - 1}"}), 400
+    if account is not None:
+        user_id = account["svd_profile_id"]
+        real_boost = get_real_likes_boost(account)
+    else:
+        try:
+            user_id = int(request.args.get("user_id", -1))
+        except ValueError:
+            return jsonify({"error": "user_id must be an integer"}), 400
+        if user_id < 0 or user_id >= NUM_USERS:
+            return jsonify({"error": f"user_id must be between 0 and {NUM_USERS - 1}"}), 400
 
     model = request.args.get("model", "svd").lower()
     if model not in ("svd", "knn", "content", "hybrid"):
@@ -172,6 +206,12 @@ def recommend():
         s_content = _minmax(s_content)
         scores    = alpha * s_svd + (1 - alpha) * s_content
 
+    # ── blend in real liked-track signal for logged-in users ──
+    personalized = False
+    if real_boost is not None:
+        scores = 0.65 * _minmax(scores) + 0.35 * _minmax(real_boost)
+        personalized = True
+
     # ── filter seen, pick top-k ──
     unseen_idx = [i for i in range(NUM_TRACKS) if i not in seen]
     unseen_scores = [(i, scores[i]) for i in unseen_idx]
@@ -187,6 +227,7 @@ def recommend():
         "user_id": user_id,
         "model":   model,
         "k":       k,
+        "personalized": personalized,
         "recommendations": results
     })
 
@@ -384,7 +425,7 @@ def trending():
     """
     try:
         k = int(request.args.get("k", 20))
-        k = max(1, min(k, 222))
+        k = max(1, min(k, len(tracks_df)))
     except ValueError:
         k = 20
 
