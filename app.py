@@ -280,21 +280,26 @@ def similar():
 @app.route("/tracks", methods=["GET"])
 def all_tracks():
     """
-    GET /tracks?sort=popularity&order=desc&genre=pop&limit=50
+    GET /tracks?sort=popularity&order=desc&genre=pop&limit=50&offset=0
 
-    sort  : popularity | danceability | energy | valence | acousticness | tempo
-    order : asc | desc
-    genre : filter by genre (partial match)
-    limit : 1–222
+    sort   : popularity | danceability | energy | valence | acousticness | tempo
+    order  : asc | desc
+    genre  : filter by genre (partial match)
+    limit  : 1–200 per page (default 50)
+    offset : pagination offset (default 0)
     """
     sort_by = request.args.get("sort", "popularity")
     order   = request.args.get("order", "desc")
     genre   = request.args.get("genre", "")
     try:
-        limit = int(request.args.get("limit", 222))
-        limit = max(1, min(limit, 222))
+        limit = int(request.args.get("limit", 50))
+        limit = max(1, min(limit, 200))
     except ValueError:
-        limit = 222
+        limit = 50
+    try:
+        offset = max(0, int(request.args.get("offset", 0)))
+    except ValueError:
+        offset = 0
 
     valid_sorts = {"popularity", "danceability", "energy", "valence",
                    "acousticness", "instrumentalness", "tempo", "liveness"}
@@ -305,13 +310,27 @@ def all_tracks():
     if genre:
         df = df[df["genre_clean"].str.lower().str.contains(genre.lower(), na=False)]
 
-    df = df.sort_values(sort_by, ascending=(order == "asc")).head(limit)
+    df = df.sort_values(sort_by, ascending=(order == "asc"))
+    total = len(df)
+    page = df.iloc[offset:offset + limit]
 
     return jsonify({
-        "total":  len(df),
-        "sort":   sort_by,
-        "order":  order,
-        "tracks": [track_to_dict(row) for _, row in df.iterrows()]
+        "total":    total,
+        "offset":   offset,
+        "limit":    limit,
+        "has_more": offset + limit < total,
+        "sort":     sort_by,
+        "order":    order,
+        "tracks":   [track_to_dict(row) for _, row in page.iterrows()]
+    })
+
+
+@app.route("/genres", methods=["GET"])
+def genres():
+    """GET /genres — every genre in the catalogue with track counts, for filter chips."""
+    counts = tracks_df["genre_clean"].value_counts()
+    return jsonify({
+        "genres": [{"name": g, "count": int(c)} for g, c in counts.items()]
     })
 
 
